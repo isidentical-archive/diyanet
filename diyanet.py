@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import shelve
-from dataclasses import dataclass, field
+from argparse import ArgumentParser
+from dataclasses import asdict, dataclass, field
+from datetime import time
 from enum import IntEnum
-from functools import partial
+from functools import partial, partialmethod
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Dict
+from typing import Callable, Dict, Iterator, Type, TypeVar
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -44,12 +46,12 @@ class Region(GeographicUnit):
 
 @dataclass
 class PrayerTimes:
-    fajr: str
-    sunrise: str
-    dhuhr: str
-    asr: str
-    maghrib: str
-    isha: str
+    fajr: time
+    sunrise: time
+    dhuhr: time
+    asr: time
+    maghrib: time
+    isha: time
 
 
 def _get_cache_dir() -> Path:
@@ -102,6 +104,9 @@ class OptionParser(HTMLParser):
         if tag == "select" and self.record_options:
             self.record_options = False
             self.options.sort(key=lambda t: t[1])
+
+
+UnitType = TypeVar("UnitType", Type[State], Type[Region])
 
 
 class PrayerTimeParser(HTMLParser):
@@ -168,7 +173,6 @@ class Diyanet:
 
     def do_request(self, request: Request) -> str:
         address = request.get_full_url()
-        print(address)
         if address in self._page_cache:
             return self._page_cache[request.url]
 
@@ -181,12 +185,8 @@ class Diyanet:
         request = Request(f"{self.base_url}{endpoint}?" + urlencode(kwargs))
         return self.do_request(request)
 
-    def get_country(self, name: str) -> Country:
-        if name.casefold() in self._countries_cache:
-            return self._countries_cache[name.casefold()]
-        else:
-            print(self._countries_cache)
-            raise ValueError(f"Unknown/unsupported country: '{name}'")
+    def get_countries(self) -> Iterator[Country]:
+        yield from self._countries_cache.values()
 
     def get_states(self, country: Country) -> Iterator[State]:
         data = json.loads(
@@ -217,16 +217,56 @@ class Diyanet:
                 state,
             )
 
+    def get_country(self, name: str) -> Country:
+        for country in self.get_countries():
+            if name.casefold() == country.name.casefold():
+                return country
+        else:
+            raise ValueError(f"Unknown/unsupported country: '{name}'")
+
+    def _geographic_search(
+        self, unit: UnitType, arg: GeographicUnit, name: str
+    ) -> UnitType:
+        unit_name = unit.__name__.lower()
+        lister = getattr(self, f"get_{unit_name}s")
+        for listing in lister(arg):
+            if name.casefold() == listing.name.casefold():
+                return listing
+        else:
+            raise ValueError(f"Unknown/unsupported {unit_name}: '{name}'")
+
+    get_state = partialmethod(_geographic_search, State)
+    get_region = partialmethod(_geographic_search, Region)
+
     def get_times(self, region: Region) -> PrayerTimes:
         page = self.fetch(region.url)
         parser = PrayerTimeParser()
         parser.feed(page)
         times = dict(parser.times)
         return PrayerTimes(
-            times["İmsak"],
-            times["Güneş"],
-            times["Öğle"],
-            times["İkindi"],
-            times["Akşam"],
-            times["Yatsı"],
+            time.fromisoformat(times["İmsak"]),
+            time.fromisoformat(times["Güneş"]),
+            time.fromisoformat(times["Öğle"]),
+            time.fromisoformat(times["İkindi"]),
+            time.fromisoformat(times["Akşam"]),
+            time.fromisoformat(times["Yatsı"]),
         )
+
+
+def main():
+    parser = ArgumentParser()
+    parser.add_argument("country")
+    parser.add_argument("state")
+    parser.add_argument("region")
+    options = parser.parse_args()
+
+    connector = Diyanet()
+    country = connector.get_country(options.country)
+    state = connector.get_state(country, options.state)
+    region = connector.get_region(state, options.region)
+    for key, value in asdict(connector.get_times(region)).items():
+        print(key.title(), "===>", value)
+
+
+if __name__ == "__main__":
+    main()
