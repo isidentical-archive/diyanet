@@ -4,6 +4,7 @@ import json
 import os
 import shelve
 from dataclasses import dataclass, field
+from enum import IntEnum
 from functools import partial
 from html.parser import HTMLParser
 from pathlib import Path
@@ -11,9 +12,10 @@ from typing import Dict
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-BASE_URL = "https://namazvakitleri.diyanet.gov.tr/tr-TR/home"
+BASE_URL = "https://namazvakitleri.diyanet.gov.tr"
 CACHE_PRIORITY = ("DIYANET_CACHE_HOME", "XDG_CACHE_HOME")
 
+RecordStates = IntEnum("RecordStates", "NAME VALUE")
 shadow_field = partial(field, repr=False)
 
 
@@ -38,6 +40,16 @@ class Region(GeographicUnit):
     url: str
     country: Country = shadow_field()
     state: State = shadow_field()
+
+
+@dataclass
+class PrayerTimes:
+    fajr: str
+    sunrise: str
+    dhuhr: str
+    asr: str
+    maghrib: str
+    isha: str
 
 
 def _get_cache_dir() -> Path:
@@ -92,6 +104,40 @@ class OptionParser(HTMLParser):
             self.options.sort(key=lambda t: t[1])
 
 
+class PrayerTimeParser(HTMLParser):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.times = []
+        self.record_state = None
+
+    def handle_starttag(self, tag, _attr):
+        attributes = dict(_attr)
+        if tag == "div" and "class" in attributes:
+            if attributes["class"] == "tpt-title":
+                self.record_state = RecordStates.NAME
+            elif attributes["class"] == "tpt-time":
+                self.record_state = RecordStates.VALUE
+
+    def handle_data(self, data):
+        if self.record_state is None:
+            return
+
+        if self.record_state is RecordStates.NAME and (
+            len(self.times) == 0 or self.times[-1][1] is not None
+        ):
+            self.times.append([data.strip(), None])
+        elif (
+            self.record_state is RecordStates.VALUE
+            and self.times[-1][1] is None
+        ):
+            self.times[-1][1] = data
+        else:
+            self.times.pop()
+
+    def handle_endtag(self, tag):
+        self.record_state = None
+
+
 class Diyanet:
     def __init__(
         self,
@@ -112,7 +158,7 @@ class Diyanet:
             setattr(self, f"_{section}_cache", db[section])
 
     def initalize_countries(self) -> Dict[str, Country]:
-        page = self.fetch("/")
+        page = self.fetch("/tr-TR/home")
         country_parser = OptionParser(identifier="country-select")
         country_parser.feed(page)
         return {
@@ -122,6 +168,7 @@ class Diyanet:
 
     def do_request(self, request: Request) -> str:
         address = request.get_full_url()
+        print(address)
         if address in self._page_cache:
             return self._page_cache[request.url]
 
@@ -144,16 +191,18 @@ class Diyanet:
     def get_states(self, country: Country) -> Iterator[State]:
         data = json.loads(
             self.fetch(
-                "/GetRegList", ChangeType="country", CountryId=country.idx
+                "/tr-TR/home/GetRegList",
+                ChangeType="country",
+                CountryId=country.idx,
             )
         )
         for state in data["StateList"]:
             yield State(state["SehirAdiEn"], state["SehirID"], country)
 
-    def get_regions(self, state: State):
+    def get_regions(self, state: State) -> Iterator[Region]:
         data = json.loads(
             self.fetch(
-                "/GetRegList",
+                "/tr-TR/home/GetRegList",
                 ChangeType="state",
                 CountryId=state.country.idx,
                 StateId=state.idx,
@@ -167,3 +216,17 @@ class Diyanet:
                 state.country,
                 state,
             )
+
+    def get_times(self, region: Region) -> PrayerTimes:
+        page = self.fetch(region.url)
+        parser = PrayerTimeParser()
+        parser.feed(page)
+        times = dict(parser.times)
+        return PrayerTimes(
+            times["İmsak"],
+            times["Güneş"],
+            times["Öğle"],
+            times["İkindi"],
+            times["Akşam"],
+            times["Yatsı"],
+        )
