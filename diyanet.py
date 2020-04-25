@@ -174,7 +174,7 @@ class Diyanet:
     def do_request(self, request: Request) -> str:
         address = request.get_full_url()
         if address in self._page_cache:
-            return self._page_cache[request.url]
+            return self._page_cache[address]
 
         with urlopen(request) as page:
             self._page_cache[address] = content = page.read().decode()
